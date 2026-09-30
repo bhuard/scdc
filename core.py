@@ -315,8 +315,12 @@ def resistive_field(asm: Assembly, loads, merge_groups=None, K_stiff=None):
     resid = np.zeros(ncomp)
     np.add.at(resid, lab, fm)
     if np.max(np.abs(resid)) > 1e-9 * max(1.0, np.max(np.abs(fm))):
-        raise ValueError("unbalanced loads on a connected component "
-                         f"(residuals {resid})")
+        bad = np.where(np.abs(resid) > 1e-9 * max(1.0, np.max(np.abs(fm))))[0]
+        raise ValueError("unbalanced loads on a piece of metal not connected "
+                         f"in DC to the rest (components {bad.tolist()}, "
+                         f"residuals {resid[bad]}). A terminal lies on a piece "
+                         "without return path, use solver.build_terminal_sets "
+                         "to restrict the returns to the connected pads")
 
     Sm = Sm.tolil()
     pins = []

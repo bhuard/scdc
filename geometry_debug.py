@@ -10,6 +10,7 @@ Dependances optionnelles (seulement pour cette couche) :
 from __future__ import annotations
 
 import numpy as np
+import time
 
 try:
     from .core import Assembly, Sheet, effective_penetration_depth
@@ -273,30 +274,121 @@ def _pslg_lines(lines, tol=1e-7):
     S2 = np.unique(np.sort(S2, axis=1), axis=0)
     return V2, S2
 
+def _pslg_report(V, S, H, label="", top=6):
+    """Statistics of the planar straight-line graph handed to Triangle.
 
+    Three quantities govern whether Triangle terminates.
+      - the shortest segment, which sets the smallest feature,
+      - the closest pair of distinct vertices, since a pair below the local
+        segment length is a near-duplicate that noding did not merge,
+      - the smallest angle between two segments sharing a vertex. Ruppert
+        refinement is only guaranteed to terminate for input angles above
+        about 60 deg, and in practice diverges below a few degrees.
+    """
+    from scipy.spatial import cKDTree
+    A, B = V[S[:, 0]], V[S[:, 1]]
+    L = np.hypot(*(B - A).T)
+    print(f"  PSLG{label}: {len(V)} vertices, {len(S)} segments, "
+          f"{len(H)} hole point(s)", flush=True)
+    k = int(np.argmin(L))
+    print(f"    segment length um: min {L.min():.3e} at "
+          f"({V[S[k, 0], 0]:.4f}, {V[S[k, 0], 1]:.4f}), "
+          f"p1 {np.percentile(L, 1):.3e}, median {np.median(L):.3e}, "
+          f"max {L.max():.3e}", flush=True)
+    print(f"    segments shorter than 1e-3 um: {int((L < 1e-3).sum())}, "
+          f"than 1e-2 um: {int((L < 1e-2).sum())}", flush=True)
+
+    # closest pair of distinct vertices
+    d, j = cKDTree(V).query(V, k=2)
+    d, j = d[:, 1], j[:, 1]
+    o = np.argsort(d)[:top]
+    print(f"    closest vertex pairs um: {d[o[0]]:.3e} ... "
+          f"{d[o[-1]]:.3e}", flush=True)
+    for i in o:
+        print(f"      d = {d[i]:.3e} at ({V[i, 0]:.4f}, {V[i, 1]:.4f})",
+              flush=True)
+
+    # smallest angle between segments meeting at a vertex
+    vid = np.concatenate([S[:, 0], S[:, 1]])
+    oth = np.concatenate([S[:, 1], S[:, 0]])
+    ang = np.arctan2(V[oth, 1] - V[vid, 1], V[oth, 0] - V[vid, 0])
+    order = np.lexsort((ang, vid))
+    vid, ang = vid[order], ang[order]
+    same = vid[1:] == vid[:-1]
+    if same.any():
+        gap = np.degrees(np.diff(ang))[same]
+        gv = vid[1:][same]
+        o = np.argsort(gap)[:top]
+        print(f"    smallest angle between incident segments: "
+              f"{gap[o[0]]:.4f} deg", flush=True)
+        for i in o:
+            v = gv[i]
+            print(f"      {gap[i]:.4f} deg at ({V[v, 0]:.4f}, {V[v, 1]:.4f})",
+                  flush=True)
+        print(f"    vertices with an incident angle below 1 deg: "
+              f"{len(np.unique(gv[gap < 1.0]))}", flush=True)
+
+    # exact duplicate segments should have been removed by _pslg_lines
+    key = np.sort(S, axis=1)
+    if len(np.unique(key, axis=0)) != len(S):
+        print("    WARNING duplicate segments present", flush=True)
+
+
+def _mesh_report_local(V, T, label="", h_small=1e-3):
+    """h percentiles and the location of the cluster of sliver triangles."""
+    p = V[T]
+    h = np.sqrt(0.5 * np.abs((p[:, 1, 0] - p[:, 0, 0]) * (p[:, 2, 1] - p[:, 0, 1])
+                             - (p[:, 2, 0] - p[:, 0, 0]) * (p[:, 1, 1] - p[:, 0, 1])))
+    q = np.percentile(h, [0, 1, 25, 50, 75, 99, 100])
+    print(f"  mesh{label}: {len(T)} triangles, h = sqrt(area) um "
+          + "  ".join(f"p{a:g}={b:.3g}" for a, b in
+                      zip([0, 1, 25, 50, 75, 99, 100], q)), flush=True)
+    bad = h < h_small
+    n = int(bad.sum())
+    if n:
+        c = p[bad].mean(axis=1)
+        print(f"    WARNING {n} triangles ({100 * n / len(T):.1f} %) with "
+              f"h < {h_small:g} um", flush=True)
+        print(f"    their bounding box x [{c[:, 0].min():.4f}, "
+              f"{c[:, 0].max():.4f}] y [{c[:, 1].min():.4f}, "
+              f"{c[:, 1].max():.4f}] um", flush=True)
+        print(f"    total area {np.sum(h[bad] ** 2):.3e} um2, centroid "
+              f"({c[:, 0].mean():.4f}, {c[:, 1].mean():.4f})", flush=True)
+        # the densest 20 um cell, to be opened in KLayout
+        ij = np.floor(c / 20.0).astype(np.int64)
+        key = ij[:, 0] * 10 ** 7 + ij[:, 1]
+        uk, cnt = np.unique(key, return_counts=True)
+        k = int(np.argmax(cnt))
+        print(f"    densest 20 um cell x {uk[k] // 10 ** 7 * 20:.0f} "
+              f"y {uk[k] % 10 ** 7 * 20:.0f}, {cnt[k]} sliver triangles, "
+              f"{len(uk)} cell(s) affected", flush=True)
+    return h
+
+
+# ----------------------------------------------------------------------
 def triangulate(geom, seg_len, extra_rings=(), min_angle=28.0, quiet=True,
-                refine=(), spacing=None, seg_max=None, seg_far=None):
+                refine=(), spacing=None, seg_max=None, seg_far=None,
+                debug=False, max_steiner=None, quality=True):
     """Maille une geometrie shapely avec Triangle, avec gradation.
 
     seg_len : longueur de reference des segments (um).
-    spacing : fonction pts(N,2) -> espacement local des points de bord. Par
-              defaut seg_len partout. Le maillage est fin sur les bords et
-              Triangle le laisse grossir vers l'interieur.
-    seg_far : espacement le plus grossier atteint par `spacing` (um), sert a
-              la premiere passe de subdivision. Defaut = max de spacing sur
-              les milieux d'aretes.
+    spacing : fonction pts(N,2) -> espacement local des points de bord.
+    seg_far : espacement le plus grossier atteint par `spacing` (um).
     seg_max : taille maximale des triangles interieurs (um), None = aucune.
-    refine  : liste de (x, y, seg_local) imposant une taille de maille dans la
-              region fermee contenant (x, y).
+    refine  : liste de (x, y, seg_local).
+    debug, max_steiner, quality : see the module docstring.
     """
     import triangle as tr
+    t0 = time.time()
     if spacing is None:
         spacing = lambda p: np.full(len(p), seg_len)
     lines = _noded_linework(geom, extra_rings)
+    if debug:
+        nv = sum(len(r) for r in lines)
+        print(f"  noded linework: {len(lines)} polyline(s), {nv} vertices, "
+              f"{time.time() - t0:.1f} s", flush=True)
 
-    # ---- passe 1 : subdivision uniforme a l'espacement grossier, pour que
-    # le test d'appartenance a la zone fine soit fait par morceaux sur les
-    # longues aretes
+    # ---- passe 1 : subdivision uniforme a l'espacement grossier
     if seg_far is None:
         mids = np.vstack([0.5 * (r[:-1] + r[1:]) for r in lines if len(r) > 1])
         seg_far = float(np.max(spacing(mids)))
@@ -307,19 +399,30 @@ def triangulate(geom, seg_len, extra_rings=(), min_angle=28.0, quiet=True,
 
     V, S = _pslg_lines(lines)
     H = _hole_points(geom)
+    if debug:
+        _pslg_report(V, S, H)
+
     A = dict(vertices=V, segments=S)
     if len(H):
         A['holes'] = H
-    flags = f"pq{min_angle:g}"
-    if seg_max:
-        flags += f"a{np.sqrt(3.0) / 4.0 * seg_max ** 2:.10g}"
+    flags = "p"
+    if quality:
+        flags += f"q{min_angle:g}"
+        if seg_max:
+            flags += f"a{np.sqrt(3.0) / 4.0 * seg_max ** 2:.10g}"
     if refine:
         A['regions'] = np.array([[x, y, 1.0, np.sqrt(3.0) / 4.0 * s ** 2]
                                  for (x, y, s) in refine], dtype=float)
-        flags += "a" if not seg_max else ""
+        if quality and not seg_max:
+            flags += "a"
         flags += "A"
+    if max_steiner is not None:
+        flags += f"S{int(max_steiner)}"
     if quiet:
         flags += "Q"
+    if debug:
+        print(f"  Triangle switches -{flags}", flush=True)
+    t1 = time.time()
     try:
         out = tr.triangulate(A, flags)
     except RuntimeError as e:
@@ -329,9 +432,16 @@ def triangulate(geom, seg_len, extra_rings=(), min_angle=28.0, quiet=True,
             "scdc_pslg_debug.npz for diagnosis. Usual causes are invalid GDS "
             "polygons (self-intersection), or contact contours crossing with "
             "vertices closer than 1e-4 um") from e
-    return (np.asarray(out['vertices'], dtype=float),
-            np.asarray(out['triangles'], dtype=int))
-
+    Vo = np.asarray(out['vertices'], dtype=float)
+    To = np.asarray(out['triangles'], dtype=int)
+    if debug:
+        print(f"  Triangle returned in {time.time() - t1:.1f} s, "
+              f"{len(Vo) - len(V)} Steiner point(s)", flush=True)
+        _mesh_report_local(Vo, To)
+        np.savez_compressed("scdc_pslg_debug.npz", vertices=V, segments=S,
+                            holes=H)
+        print("  PSLG saved in scdc_pslg_debug.npz", flush=True)
+    return Vo, To
 
 # In build_model, pass seg_far explicitly to the metal call (optional, the
 # function recovers it from `spacing` otherwise):

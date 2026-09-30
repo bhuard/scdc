@@ -284,8 +284,15 @@ def write_report(path, model, res, sols, args, files):
     L.append(f"- Effective penetration depth Lambda = {model['Lambda']:.4g} um, "
              f"L_square = mu0 Lambda = {MU0*model['Lambda']*1e12:.4g} pH/square")
     L.append(f"- Injected current I = {I*1e3:g} mA")
-    L.append(f"- Ground current shares (layer 4): "
-             f"{np.round(model['ground_share'], 6).tolist()}")
+    gs = model.get('ground_shares')
+    if gs is None:
+        L.append(f"- Ground current shares (layer 4): "
+                 f"{np.round(model['ground_share'], 6).tolist()}")
+    else:
+        L.append("- Ground current shares (layer 4), per source. A pad not "
+                 "connected in DC to the source carries no return current:")
+        for nm, row in zip(snames, np.atleast_2d(gs)):
+            L.append(f"  - {nm}: {np.round(row, 6).tolist()}")
     L.append(f"- Flux surfaces evaluated at z = {args.get('loop_z', 0.0):g} um")
     L.append(f"- Edge segment length: {args.get('seg_len'):g} um near the region "
              f"of interest")
@@ -413,7 +420,12 @@ def solve_model(model, seg_len, out_prefix="scdc", loop_z=0.0, plot=True,
     if verbose:
         print(f"  Lambda = {model['Lambda']:.4g} um, "
               f"L_square = {MU0*model['Lambda']*1e12:.4g} pH/square")
-        print(f"  ground current shares: {np.round(model['ground_share'], 6)}")
+        gs = model.get('ground_shares')
+        if gs is None:
+            print(f"  ground current shares: {np.round(model['ground_share'], 6)}")
+        else:
+            for nm, row in zip(snames, np.atleast_2d(gs)):
+                print(f"  ground current shares for {nm}: {np.round(row, 6)}")
         print(f"  {nsrc} injection polygon(s): {', '.join(snames)}")
 
     try:

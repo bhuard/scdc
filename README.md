@@ -16,7 +16,7 @@ All lengths are in micrometres, currents in amperes, fluxes in webers.
 | 1 | all metallic structures | superconducting film, plane `z = 0` |
 | 2 | top view of the airbridges | raised sheets at `z = h` |
 | 3 | one or several polygons, disks or rectangles | injection of the current `I`, one computation per polygon |
-| 4 | polygons | returns to ground, each through `R = 0.01 Ω` |
+| 4 | polygons | returns to ground, each through `R = 0.01 Ω`, only those connected in DC to the source carry current |
 | 5 | surfaces | contours where `Φ` is computed, then `M = Φ/I` |
 | 6 | rectangles | Josephson junctions, patches with a large kinetic inductance |
 
@@ -30,8 +30,10 @@ increasing centroid `x` then `y`.
 
 Each polygon `j` of layer 3 gives rise to an independent computation, as if it
 were alone, with the current `I` injected into that polygon and returned by the
-layer-4 polygons (distribution `I_k = I (1/R_k)/Σ 1/R`). The other layer-3
-polygons are then nothing but metal. The pFFT kernel depends on the geometry
+layer-4 polygons that are connected to it in DC (distribution
+`I_k = I (1/R_k)/Σ_{l∈C} 1/R_l` over the pads `k` of the galvanic cluster `C`
+of the source, see §2.2). The other layer-3 polygons are then nothing but
+metal. The pFFT kernel depends on the geometry
 only and is built once. One obtains
 
 ```
@@ -81,11 +83,28 @@ In the established DC regime, `∂(Λ J)/∂t = E = 0` in the superconductor. Th
 film is therefore **equipotential** and the network is purely inductive. Two
 consequences follow.
 
-- The layer-4 disks are all at the same potential. With identical resistances
-  `R_k = 0.01 Ω` to ground, the current splits in **exactly equal** shares,
-  `I_k = I/N`. More generally the code uses `I_k = I (1/R_k) / Σ_j (1/R_j)`, so
-  that the common value of `R` does not influence the result. Only an imbalance
-  between resistances would.
+- The film is equipotential on each galvanic cluster, a cluster being a set
+  of metal pieces joined by the mesh or by bridge feet. The layer-4 pads of the
+  cluster `C` that contains the source are therefore all at the same potential
+  `V_C`, and `I_k = V_C / R_k`. With identical resistances `R_k = 0.01 Ω` to
+  ground, the current splits in **exactly equal** shares, `I_k = I/N_C`, `N_C`
+  being the number of pads in `C`. More generally the code uses
+
+  ```
+  I_k = I (1/R_k) / Σ_{l∈C} (1/R_l)    for k in C,
+  I_k = 0                              otherwise,
+  ```
+
+  so that the common value of `R` does not influence the result. Only an
+  imbalance between resistances would. A pad lying on a piece of metal with no
+  DC path to the source carries no net current. That piece still carries
+  screening currents of zero net value, which the model computes. The shares
+  are thus computed separately for each layer-3 polygon and printed per source
+  in the report. The computation stops with an explicit message if no pad is
+  connected to a source, the current then having no return path, or if a
+  source overlaps several disjoint pieces, the split between them being then
+  undefined. A pad overlapping several disjoint pieces only contributes, for
+  each source, through its part on the cluster of that source.
 - The internal distribution is not fixed by the DC regime alone, it depends on
   history. For a zero-field cooldown followed by a ramp of the current from 0 to
   `I`, the distribution reached is the unique minimum of `E` under the
@@ -312,7 +331,8 @@ form.
 Outputs (prefix `--out`, here `result`).
 
 - `result_report.md`, a Markdown report starting with the matrix `M` in pH and
-  the eigenvalues of `M⁻¹` in mA/Φ0, then parameters, mesh, energy and
+  the eigenvalues of `M⁻¹` in mA/Φ0, then parameters (including the ground
+  current shares per source), mesh, energy and
   inductance `2E/I²` per source, flux `Φ/Φ0` per surface and per source, pillar
   currents and junction currents.
 - `result_current_<k>_<name>.png`, a map of `|K|` with streamlines for each
@@ -336,7 +356,11 @@ J = sols[0].current_density(0.1)  # A/µm² for the first source
 
 `run.solve_model(model, ...)` accepts a dictionary built by hand (mesh,
 `terminal_sets`, `rings`, …) and allows the loop over sources and the report to
-be tested without the GDS chain.
+be tested without the GDS chain. The terminal sets can be built with
+`solver.build_terminal_sets(asm, source_nodes, ground_nodes, current,
+conductances=..., contacts=...)`, which restricts the returns of each source to
+the pads of its galvanic cluster (`solver.dc_clusters`), as `build_model`
+does.
 
 Useful options.
 

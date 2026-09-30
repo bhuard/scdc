@@ -44,6 +44,98 @@ class Terminal:
 
 
 # ----------------------------------------------------------------------
+def dc_clusters(asm: Assembly, contacts=()):
+    """Label of the galvanic (DC) cluster of every node, shape (n_nodes,).
+
+    Two nodes belong to the same cluster when a path joins them through the
+    triangles of any sheet or through a vertical contact (bridge foot). The
+    nodes of a contact are merged exactly as in resistive_field, so that
+    the clusters coincide with the connected components on which the loads
+    must balance.
+    """
+    from scipy.sparse.csgraph import connected_components
+    ncomp, lab = asm.components()
+    u, v = [], []
+    for c in contacts:
+        nd = np.concatenate([c.nodes_a, c.nodes_b])
+        if len(nd) > 1:
+            u.append(np.full(len(nd) - 1, lab[nd[0]]))
+            v.append(lab[nd[1:]])
+    if not u:
+        return lab
+    u, v = np.concatenate(u), np.concatenate(v)
+    A = sp.coo_matrix((np.ones(len(u)), (u, v)), shape=(ncomp, ncomp))
+    _, clab = connected_components(A, directed=False)
+    return clab[lab]
+
+
+def build_terminal_sets(asm: Assembly, source_nodes, ground_nodes, current,
+                        conductances=None, contacts=(), source_names=None,
+                        verbose=True):
+    """One terminal set per injection polygon, the ground returns being
+    restricted to the pads connected in DC to that polygon.
+
+    In the DC regime the film is equipotential on each galvanic cluster. The
+    pads k of the cluster C that contains source j are all at the potential
+    V_C, hence I_k = G_k V_C and
+
+        I_k = I G_k / sum_{l in C} G_l    for k in C,
+        I_k = 0                           otherwise.
+
+    A pad lying on a cluster without injection carries no net DC current.
+    If a pad overlaps several clusters, only its part on the cluster of the
+    source is used.
+
+    source_nodes, ground_nodes : lists of arrays of global node indices.
+    conductances : 1/R_k of the pads, default all equal.
+    Returns (terminal_sets, shares), shares of shape (n_sources, n_ground).
+    """
+    ng = len(ground_nodes)
+    G = np.ones(ng) if conductances is None else \
+        np.asarray(conductances, dtype=float)
+    if len(G) != ng:
+        raise ValueError("one conductance per ground pad is required")
+    names = list(source_names) if source_names is not None else \
+        [f"S{j}" for j in range(len(source_nodes))]
+    clus = dc_clusters(asm, contacts)
+    gcl = [np.unique(clus[np.asarray(n, dtype=int)]) for n in ground_nodes]
+    if verbose:
+        for k, c in enumerate(gcl):
+            if len(c) > 1:
+                print(f"  warning: ground pad gnd{k} overlaps {len(c)} pieces "
+                      "of metal that are not connected in DC, each source "
+                      "uses only the part on its own piece")
+    terminal_sets = []
+    shares = np.zeros((len(source_nodes), ng))
+    for j, (nd, nm) in enumerate(zip(source_nodes, names)):
+        nd = np.asarray(nd, dtype=int)
+        cs = np.unique(clus[nd])
+        if len(cs) != 1:
+            raise ValueError(f"injection polygon '{nm}' overlaps {len(cs)} "
+                             "pieces of metal that are not connected in DC, "
+                             "the split of the injected current between them "
+                             "is undefined")
+        c = cs[0]
+        sel = [k for k in range(ng) if np.any(gcl[k] == c)]
+        if not sel:
+            raise ValueError(f"no ground pad is connected in DC to injection "
+                             f"polygon '{nm}', the current has no return path")
+        sel = np.array(sel, dtype=int)
+        shares[j, sel] = G[sel] / G[sel].sum()
+        terms = [Terminal(nd, current, nm)]
+        for k in sel:
+            gk = np.asarray(ground_nodes[k], dtype=int)
+            terms.append(Terminal(gk[clus[gk] == c], -current * shares[j, k],
+                                  f"gnd{k}"))
+        terminal_sets.append(terms)
+        if verbose and len(sel) < ng:
+            off = [f"gnd{k}" for k in range(ng) if k not in sel]
+            print(f"  source {nm}: {len(sel)} ground pad(s) connected in DC, "
+                  f"no return current through {', '.join(off)}")
+    return terminal_sets, shares
+
+
+# ----------------------------------------------------------------------
 def contact_current_operator(asm: Assembly, contacts):
     """Matrices creuses (Dx, Dy), de taille (n_contacts, n_tri), telles que
     le courant montant dans le pilier k vaille
