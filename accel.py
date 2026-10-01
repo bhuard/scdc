@@ -131,12 +131,16 @@ class MLXBackend:
         self._cache = {}
 
     def _dev(self, key, arr, dtype=None):
-        mx = self.mx
-        k = (key, id(arr))
-        if k not in self._cache:
-            self._cache[k] = mx.array(np.ascontiguousarray(
+        """Uploads arr once. The host array is kept in the cache so that the
+        identity test stays valid, an id() being reusable once the array is
+        freed."""
+        ent = self._cache.get(key)
+        if ent is None or ent[0] is not arr:
+            dev = self.mx.array(np.ascontiguousarray(
                 arr.astype(dtype or np.float32)))
-        return self._cache[k]
+            ent = (arr, dev)
+            self._cache[key] = ent
+        return ent[1]
 
     def exact_pairs(self, cen, qrel, z, area, I, J, chunk=2000000):
         mx = self.mx

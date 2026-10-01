@@ -61,17 +61,25 @@ def _safe_name(name):
 
 
 # ----------------------------------------------------------------------
-def mesh_report(model, png=None, near_cells=4, cell=50.0, top=12):
+def mesh_report(model, png=None, near_cells=4, cell=50.0, top=12,
+                grid=None, near_hmax=None):
     """Size statistics of the layer-1 mesh and location of clusters of
-    small triangles, which drive the number of near pairs."""
+    small triangles, which drive the number of near pairs.
+
+    grid and near_hmax must be those of the run for the estimate of the
+    near pairs to be the count that FastKernel will find. The radius is the
+    one of FastKernel, R_i = near_cells * max(h_grid, min(h_i, near_hmax)),
+    h_grid being --grid, or the median triangle size over all sheets when
+    --grid is absent."""
     asm = model['assembly']
     s0 = asm.sheets[0]
     n0 = len(s0.triangles)
     h = asm.h_tri[:n0]
     c = asm.centroid[:n0]
-    hg = float(np.median(asm.h_tri))
+    hg = float(grid) if grid else float(np.median(asm.h_tri))
     print()
-    print(f"  layer-1 mesh: {n0} triangles, h = sqrt(area)")
+    print(f"  layer-1 mesh: {n0} triangles, h = sqrt(area), pFFT grid "
+          f"h_grid = {hg:.3g} um ({'--grid' if grid else 'median of h'})")
     q = np.percentile(h, [0, 1, 5, 10, 25, 50, 75, 90, 99, 100])
     print("  percentiles of h (um):  " + "  ".join(
         f"p{p:g}={v:.3g}" for p, v in zip([0, 1, 5, 10, 25, 50, 75, 90, 99, 100], q)))
@@ -85,25 +93,40 @@ def mesh_report(model, png=None, near_cells=4, cell=50.0, top=12):
         from near_pairs import count_near_pairs
     from scipy.spatial import cKDTree
     C3 = np.column_stack([asm.centroid, asm.tri_z])
-    rad = near_cells * np.maximum(hg, asm.h_tri)
+    h_eff = asm.h_tri if near_hmax is None else \
+        np.minimum(asm.h_tri, float(near_hmax))
+    rad = near_cells * np.maximum(hg, h_eff)
     lens = count_near_pairs(cKDTree(C3), C3, rad)
-    print(f"  estimated near pairs: {int(lens.sum())} "
-          f"(~{lens.sum()*40/1e9:.1f} GB), floor radius {near_cells*hg:.3g} um")
-    small = h < 0.2 * hg
-    if small.any():
-        ij = np.floor(c[small] / cell).astype(np.int64)
-        key = ij[:, 0] * 10**7 + ij[:, 1]
-        uk, cnt = np.unique(key, return_counts=True)
-        order = np.argsort(-cnt)[:top]
-        print(f"  clusters of small triangles (h < 0.2 h_grid), cells of "
-              f"{cell:g} um, {len(uk)} cells affected:")
-        print("      x_min     y_min    n_small   h_min[um]   max_neighbours")
-        for k in order:
-            ix, iy = uk[k] // 10**7, uk[k] % 10**7
-            m = small.copy()
-            m[small] = key == uk[k]
-            print(f"  {ix*cell:9.0f} {iy*cell:9.0f} {cnt[k]:10d} "
-                  f"{h[m].min():11.3g} {lens[:n0][m].max():13d}")
+    nd = int(lens.sum())
+    print(f"  estimated near pairs before symmetrisation: {nd} "
+          f"({nd / asm.n_tri:.0f}/triangle, max {int(lens.max())}), radius "
+          f"{rad.min():.3g} to {rad.max():.3g} um")
+    print(f"  memory: ~{nd*40/1e9:.1f} GB for the search, at most "
+          f"~{2*nd*56/1e9:.1f} GB for the correction (symmetrisation at most "
+          "doubles the count)")
+    # cells ranked by the number of near pairs they generate, which is what
+    # sets the memory, rather than by a size threshold relative to the grid
+    ij = np.floor(c / cell).astype(np.int64)
+    key = ij[:, 0] * 10**7 + ij[:, 1]
+    uk, inv = np.unique(key, return_inverse=True)
+    inv = inv.ravel()
+    pairs = np.bincount(inv, weights=lens[:n0].astype(float))
+    ntri = np.bincount(inv)
+    hmin = np.full(len(uk), np.inf)
+    np.minimum.at(hmin, inv, h)
+    nmax = np.zeros(len(uk), dtype=np.int64)
+    np.maximum.at(nmax, inv, lens[:n0])
+    order = np.argsort(-pairs)[:top]
+    share = pairs[order] / max(float(lens[:n0].sum()), 1.0)
+    print(f"  cells of {cell:g} um generating the most near pairs "
+          f"({len(uk)} cells hold layer-1 triangles, the {len(order)} below "
+          f"hold {100 * share.sum():.1f} % of the layer-1 pairs):")
+    print("      x_min     y_min  triangles   h_min[um]   pairs (%)   "
+          "max_neighbours")
+    for k, sh in zip(order, share):
+        ix, iy = uk[k] // 10**7, uk[k] % 10**7
+        print(f"  {ix*cell:9.0f} {iy*cell:9.0f} {ntri[k]:10d} "
+              f"{hmin[k]:11.3g} {100 * sh:11.2f} {nmax[k]:16d}")
     if png:
         import matplotlib
         matplotlib.use("Agg")
@@ -614,7 +637,8 @@ def run(gds, seg_len, thickness=None, lambda_L=None, L_square=None,
                         L_square=L_square, seg_len=seg_len, current=current,
                         verbose=verbose, **kw)
     if mesh_only:
-        mesh_report(model, f"{out_prefix}_mesh.png", near_cells=near_cells)
+        mesh_report(model, f"{out_prefix}_mesh.png", near_cells=near_cells,
+                    grid=grid, near_hmax=near_hmax)
         return model, None, None
     sols, res = solve_model(
         model, seg_len, out_prefix=out_prefix, loop_z=loop_z, plot=plot,
@@ -719,6 +743,11 @@ def main(argv=None):
     p.add_argument("--min-seg", type=float, default=None,
                    help="simplify the contours to this tolerance (um) before "
                         "meshing, removes tiny segments")
+    p.add_argument("--pad-tol", type=float, default=None,
+                   help="simplify the layer-3 and layer-4 polygons to this "
+                        "tolerance (um) before their intersection with the "
+                        "metal, removes the small triangles of finely drawn "
+                        "pads")
     a = p.parse_args(argv)
 
     gr = None
@@ -742,7 +771,8 @@ def main(argv=None):
         junction_file=a.junction_file,
         bridge_L_square=a.bridge_Lsq * 1e-12 if a.bridge_Lsq is not None else None,
         show=a.show, dense=a.dense, near_cells=a.near_cells,
-        near_hmax=a.near_hmax, grid=a.grid, min_seg=a.min_seg, log_color=a.log,
+        near_hmax=a.near_hmax, grid=a.grid, min_seg=a.min_seg,
+        pad_tol=a.pad_tol, log_color=a.log,
         mesh_only=a.mesh_only,
         backend=a.backend,
         bridge_height=a.bridge_height, bridge_thickness=a.bridge_thickness,

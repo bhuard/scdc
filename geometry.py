@@ -529,7 +529,7 @@ def build_model(gds_path, *, seg_len, thickness=None, lambda_L=None,
                 layer_metal=1, layer_bridge=2, layer_source=3,
                 layer_ground=4, layer_loop=5, layer_junction=6,
                 junction_default=None, junction_file=None, min_seg=None,
-                bridge_height=3.0, bridge_thickness=None,
+                pad_tol=None, bridge_height=3.0, bridge_thickness=None,
                 bridge_lambda=None, bridge_L_square=None,
                 bridge_feet="ends", pillar_side=30.0, pillar_height=None,
                 pillar_lambda=None, pillars=True,
@@ -558,6 +558,15 @@ def build_model(gds_path, *, seg_len, thickness=None, lambda_L=None,
     fine_radius des surfaces du layer 5 et des jonctions, a seg_far au-dela
     (defaut 5*seg_len), et les triangles interieurs sont plafonnes a seg_max
     (defaut 30*seg_len).
+
+    min_seg : tolerance (um) of the Douglas-Peucker simplification of the
+    layer-1 contours, applied before noding, the neighbourhood of the
+    junctions being kept exact.
+    pad_tol : tolerance (um) of the simplification of the layer-3 and
+    layer-4 polygons. It is applied to each pad polygon BEFORE its
+    intersection with the metal, so that wherever the contact contour
+    follows a metal edge it is that edge exactly and no near-tangent pair
+    of lines reaches Triangle. None = contours kept as drawn.
 
     Ponts (layer 2). Le polygone est la vue de dessus du pont. Ses pieds sont
     les composantes connexes de pont ∩ metal retenues par `bridge_feet`
@@ -648,13 +657,31 @@ def build_model(gds_path, *, seg_len, thickness=None, lambda_L=None,
             print(f"  {len(loops)} flux surface(s) in layer {layer_loop}: "
                   f"{', '.join(loop_names)}")
 
-    # effective contact regions (intersection with the metal)
-    src_c = [s_.intersection(metal) for s_ in src_regions]
+    # effective contact regions (intersection with the metal). The pad
+    # polygons are simplified first, the metal edge then bounds the contact
+    # exactly where the pad overhangs it.
+    def _simplify_pad(p, tol):
+        if not tol:
+            return p
+        q = unary_union(_as_polygon_list(
+            p.simplify(tol, preserve_topology=True).buffer(0)))
+        return p if q.is_empty else q
+
+    if pad_tol and verbose:
+        n_before = sum(len(r) for g in src_regions + gnd_regions
+                       for r in _rings(g))
+    src_s = [_simplify_pad(s_, pad_tol) for s_ in src_regions]
+    gnd_s = [_simplify_pad(g, pad_tol) for g in gnd_regions]
+    if pad_tol and verbose:
+        n_after = sum(len(r) for g in src_s + gnd_s for r in _rings(g))
+        print(f"  layer-{layer_source} and layer-{layer_ground} contours "
+              f"simplified to {pad_tol} um, {n_before} -> {n_after} vertices")
+    src_c = [s_.intersection(metal) for s_ in src_s]
     for nm, c_ in zip(source_names, src_c):
         if c_.is_empty:
             raise ValueError(f"injection polygon '{nm}' does not overlap the "
                              f"metal of layer {layer_metal}")
-    gnd_c = [g.intersection(metal) for g in gnd_regions]
+    gnd_c = [g.intersection(metal) for g in gnd_s]
     feet = []            # (indice_du_pont, geometrie du pied)
     for bi, b in enumerate(bridges):
         parts = _as_polygon_list(b.intersection(metal))
@@ -670,7 +697,9 @@ def build_model(gds_path, *, seg_len, thickness=None, lambda_L=None,
             feet.append((bi, f))
 
     # ---------------------------------------------------------- jonctions
-    junction_rects = _as_polygon_list(geo[layer_junction])
+    # sorted like layers 3 and 5 (centroid x, then y), so that junction k
+    # designates the same rectangle from one run to the next
+    junction_rects = _sort_polygons(_as_polygon_list(geo[layer_junction]))
     junctions = []
     for k, rect in enumerate(junction_rects):
         # zone active : ce qui depasse des electrodes, sinon le rectangle
@@ -700,8 +729,12 @@ def build_model(gds_path, *, seg_len, thickness=None, lambda_L=None,
     for jn in junctions:
         if jn['params'] is None:
             if junction_default is None:
-                raise ValueError(f"junction {jn['index']} has no parameters "
-                                 "(GDS label, junction_file or junction_default)")
+                b = jn['rect'].bounds
+                raise ValueError(
+                    f"junction {jn['index']} at x [{b[0]:.3f}, {b[2]:.3f}] "
+                    f"y [{b[1]:.3f}, {b[3]:.3f}] um has no parameters (no "
+                    f"layer-{layer_junction} TEXT label inside it, no "
+                    "junction_file entry, no --EJ/--Ic/--LJ default)")
             jn['params'] = dict(junction_default)
         LJ, Ic, EJ = josephson_inductance(**_norm_params(jn['params']))
         jn.update(LJ=LJ, Ic=Ic, EJ=EJ, LJ0=LJ)
@@ -754,7 +787,9 @@ def build_model(gds_path, *, seg_len, thickness=None, lambda_L=None,
         jn['Lambda'] = jn['LJ'] / (MU0 * jn['F'])
         Lam_tri[m] = jn['Lambda']
         if verbose:
-            print(f"  junction {jn['index']}: L_J = {jn['LJ']*1e9:.4g} nH, "
+            cx, cy = jn['rect'].centroid.coords[0]
+            print(f"  junction {jn['index']} at ({cx:.1f}, {cy:.1f}): "
+                  f"L_J = {jn['LJ']*1e9:.4g} nH, "
                   f"I_c = {jn['Ic']*1e6:.4g} uA, "
                   f"E_J/h = {jn['EJ']/6.62607015e-34/1e9:.4g} GHz, "
                   f"F = L/L_square = {jn['F']:.4g}, "
