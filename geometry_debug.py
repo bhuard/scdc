@@ -634,7 +634,74 @@ def _junction_geometry_factor(jn, V, T, verbose=True):
     jn['contacts'] = (A_nodes, B_nodes)
 
 
-def build_model(gds_path, *, seg_len, thickness=None, lambda_L=None,
+# ----------------------------------------------------------------------
+# Airbridges as exact rectangles
+# ----------------------------------------------------------------------
+def _rectify_bridges(bridges, snap_deg=0.5, iou_warn=0.95, verbose=True):
+    """Replaces each layer-2 polygon by its closest rectangle.
+
+    The closest rectangle minimises the area of the symmetric difference
+    with the polygon, see rectfit.py (moment tensor and minimum-area
+    bounding rectangle for the orientation, then each edge placed where
+    half of its length lies inside the polygon). A rectangle tilted by at
+    most snap_deg degrees with respect to the x or y axis is made exactly
+    axis-aligned, its centre and sides being kept.
+
+    Returns (rectangles as shapely polygons, list of fit dictionaries).
+    """
+    from shapely.geometry import Polygon
+    from scipy.spatial import cKDTree
+    try:
+        from .rectfit import fit_rectangle, rect_overlap_area
+    except ImportError:
+        from rectfit import fit_rectangle, rect_overlap_area
+    rects, fits = [], []
+    for bi, b in enumerate(bridges):
+        rings = [np.asarray(b.exterior.coords)] + \
+                [np.asarray(r.coords) for r in b.interiors]
+        f = fit_rectangle(rings, snap_deg=snap_deg)
+        f['index'] = bi
+        fits.append(f)
+        rects.append(Polygon(f['corners']))
+        if verbose and f['iou'] < iou_warn:
+            print(f"  warning: bridge {bi} at ({f['center'][0]:.1f}, "
+                  f"{f['center'][1]:.1f}) is not close to a rectangle, "
+                  f"IoU = {f['iou']:.4f}, largest vertex deviation "
+                  f"{f['dmax']:.3g} um, check it or use --bridge-shape exact")
+        if verbose and f['n_holes']:
+            print(f"  warning: bridge {bi} has {f['n_holes']} hole(s), "
+                  "filled by the rectangle")
+    if len(fits) > 1:
+        cen = np.array([f['center'] for f in fits])
+        rmax = max(np.hypot(f['length'], f['width']) for f in fits)
+        for i, j in sorted(cKDTree(cen).query_pairs(rmax)):
+            a = rect_overlap_area(fits[i], fits[j])
+            if a > 0 and verbose:
+                print(f"  warning: the rectangles of bridges {i} and {j} "
+                      f"overlap ({a:.3g} um2), their sheets are meshed "
+                      "separately")
+    if verbose and fits:
+        nv = np.array([f['n_vertices'] for f in fits])
+        iou = np.array([f['iou'] for f in fits])
+        dm = np.array([f['dmax'] for f in fits])
+        tilt = np.array([abs(f['angle'] - 90.0 * np.round(f['angle'] / 90.0))
+                         for f in fits])
+        nsnap = sum(f['snapped'] for f in fits)
+        print(f"  layer 2: {len(fits)} polygon(s) replaced by their closest "
+              f"rectangle, {nv.min()} to {nv.max()} vertices, IoU >= "
+              f"{iou.min():.6f}, vertex deviation <= {dm.max():.3g} um, "
+              f"{nsnap} snapped to the axes (tilt <= {snap_deg:g} deg)")
+        tl = tilt > 1e-9
+        if tl.any():
+            print(f"  layer 2: {int(tl.sum())} rectangle(s) remain tilted "
+                  f"with respect to the axes, {tilt[tl].min():.3g} to "
+                  f"{tilt[tl].max():.3g} deg (--bridge-snap-angle to align "
+                  "them)")
+    return rects, fits
+
+def build_model(gds_path, *,
+                bridge_shape="rect", bridge_snap_angle=0.5,
+                seg_len, thickness=None, lambda_L=None,
                 L_square=None, seg_far=None, fine_radius=None, seg_max=None,
                 layer_metal=1, layer_bridge=2, layer_source=3,
                 layer_ground=4, layer_loop=5, layer_junction=6,
@@ -681,6 +748,14 @@ def build_model(gds_path, *, seg_len, thickness=None, lambda_L=None,
     dans `pillar_L` (matrice n_contacts x n_contacts, courants montants).
     `pillars=False` desactive ce terme. `pillar_lambda` (defaut lambda_L du
     pont) sert a la petite contribution cinetique du pilier.
+
+    Bridge shape. With bridge_shape="rect" (default) every connected
+    component of layer 2 is replaced by its closest rectangle, the one
+    minimising the area of the symmetric difference (rectfit.py), before
+    the feet are computed. Rectangles tilted by at most bridge_snap_angle
+    degrees with respect to the axes are made exactly axis-aligned.
+    bridge_shape="exact" keeps the polygons as drawn. The fits are
+    returned in `bridge_fits` (None in exact mode).
 
     Retourne un dictionnaire avec toutes les pieces du probleme.
     """
@@ -743,6 +818,12 @@ def build_model(gds_path, *, seg_len, thickness=None, lambda_L=None,
     src_regions = _sort_polygons(_as_polygon_list(src_geo))
     gnd_regions = _sort_polygons(_as_polygon_list(gnd_geo))
     bridges = _as_polygon_list(brg_geo)
+    if bridge_shape not in ("rect", "exact"):
+        raise ValueError("bridge_shape must be 'rect' or 'exact'")
+    bridge_fits = None
+    if bridges and bridge_shape == "rect":
+        bridges, bridge_fits = _rectify_bridges(
+            bridges, snap_deg=bridge_snap_angle, verbose=verbose)
     loops = _sort_polygons(_as_polygon_list(loop_geo))
     if not src_regions:
         raise ValueError(f"layer {layer_source} is empty, at least one "
@@ -986,7 +1067,9 @@ def build_model(gds_path, *, seg_len, thickness=None, lambda_L=None,
         metal=[r.tolist() for r in _rings(metal)],
     )
 
-    return dict(assembly=asm, terminals=terminals, terminal_sets=terminal_sets,
+    return dict(assembly=asm,
+                bridge_fits=bridge_fits, bridge_shape=bridge_shape,
+                terminals=terminals, terminal_sets=terminal_sets,
                 sources=sources, source_names=source_names,
                 loop_names=loop_names, contacts=contacts,
                 pillar_L=pillar_L, current=current,

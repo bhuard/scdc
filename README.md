@@ -222,6 +222,39 @@ components furthest apart are feet, the others are flown over without contact.
 `--bridge-feet all` restores the behaviour where every overlap region is a
 contact (multiple vias).
 
+**Bridges as rectangles.** By default (`--bridge-shape rect`) every connected
+component `P` of layer 2 is replaced, before the feet are computed, by the
+rectangle `R` closest to it in the sense of the area of the symmetric
+difference
+
+```
+|P △ R| = |P| + |R| − 2 |P ∩ R|
+```
+
+(`rectfit.py`, pure numpy). The orientation is taken from two candidates, the
+principal axes of the second-moment tensor of `P` (closed form, `O(n)`, exact
+for any shape with two orthogonal mirror axes) and the minimum-area bounding
+rectangle (rotating calipers, `O(n log n)`, defined also for square-like
+shapes). The initial rectangle is centred on the centroid with sides
+`√(12 σ_u²)` and `√(12 σ_v²)`, exact for a rectangle whatever its number of
+vertices. Each edge is then moved at fixed orientation to the minimum of the
+1D restriction of `|P △ R|`. Since
+
+```
+∂|P △ R| / ∂u₁ = (v₁ − v₀) − 2 ℓ(u₁) ,
+```
+
+with `ℓ(u)` the length of the edge `{u} × [v₀, v₁]` inside `P`, each edge of the
+optimum has exactly half of its length inside `P`. For a rectangle whose
+corners are rounded or chamfered by up to a quarter of the shorter side, the
+result is the unrounded rectangle. A rectangle tilted by at most
+`--bridge-snap-angle` degrees (default 0.5) with respect to an axis is rotated
+about its centre to be exactly axis-aligned, which avoids nearly parallel
+segments between bridge and metal contours in the mesher. The report lists,
+for each bridge, the number of vertices, centre, sides, angle, `IoU` and the
+largest distance of a vertex of `P` to `∂R`, and a warning is printed when
+`IoU < 0.95`. `--bridge-shape exact` keeps the polygons as drawn.
+
 Each foot is connected to the plane by a vertical pillar, a parallelepiped with
 a square base of side `a` (`--pillar-side`, default 30 µm) and height `h`
 (`--pillar-height`, default `--bridge-height`). A vertical current produces no
@@ -370,6 +403,8 @@ Useful options.
 | `--bridge-height` | altitude of the airbridges |
 | `--bridge-thickness`, `--bridge-lambda` | distinct properties for the bridges |
 | `--bridge-feet` | `ends` (default, two extreme feet) or `all` |
+| `--bridge-shape` | `rect` (default, closest rectangle to each layer-2 polygon) or `exact` |
+| `--bridge-snap-angle` | tilt (deg) below which a bridge rectangle is made axis-aligned, default 0.5 |
 | `--pillar-side`, `--pillar-height`, `--pillar-lambda`, `--no-pillars` | bridge pillars |
 | `--loop-z` | altitude of the layer-5 surfaces |
 | `--ground-resistances` | list, useful only when the `R_k` differ |

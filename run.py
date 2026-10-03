@@ -235,6 +235,29 @@ def _fmt_c(z, fmt="{:.6g}"):
     return fmt.format(z.real) + f" {sgn} {fmt.format(abs(z.imag))} i"
 
 
+def _bridge_table(fits, snap_deg=None):
+    """Markdown lines describing the rectangles that replace the layer-2
+    polygons."""
+    L = ["## Bridges (layer 2) replaced by rectangles\n",
+         "Each layer-2 polygon P is replaced by the rectangle R minimising "
+         "|P xor R|. IoU = |P n R| / |P u R|, deviation = largest distance "
+         "of a vertex of P to the boundary of R. The angle is that of the "
+         "long side, in (-90, 90] deg."
+         + (f" Rectangles tilted by at most {snap_deg:g} deg with respect "
+            "to an axis are made exactly axis-aligned." if snap_deg else "")
+         + "\n",
+         "| bridge | vertices | x_c | y_c | length (um) | width (um) | "
+         "angle (deg) | snapped from (deg) | IoU | deviation (um) |",
+         "|---|---|---|---|---|---|---|---|---|---|"]
+    for f in fits:
+        sn = f"{f['tilt_before_snap']:+.4g}" if f['snapped'] else "-"
+        L.append(f"| {f['index']} | {f['n_vertices']} | {f['center'][0]:.4f} | "
+                 f"{f['center'][1]:.4f} | {f['length']:.4f} | "
+                 f"{f['width']:.4f} | {f['angle']:+.4f} | {sn} | "
+                 f"{f['iou']:.6f} | {f['dmax']:.3g} |")
+    L.append("")
+    return L
+
 def write_report(path, model, res, sols, args, files):
     """Markdown report. The mutual-inductance matrix and the eigenvalues of
     its inverse come first."""
@@ -325,7 +348,19 @@ def write_report(path, model, res, sols, args, files):
         L.append(f"- Bridges: {len(model['bridges'])}, contacts (feet): "
                  f"{len(model['contacts'])}, pillar inductances "
                  f"{'included' if np.any(model.get('pillar_L')) else 'disabled'}")
+    if model.get('bridges'):
+        L.append("- Bridge shape: " + (
+            "closest rectangle to each layer-2 polygon (minimum area of the "
+            "symmetric difference), axis snapping for tilts up to "
+            f"{args.get('bridge_snap_angle', 0.5):g} deg"
+            if model.get('bridge_fits') is not None
+            else "layer-2 polygons as drawn"))
     L.append("")
+
+    # ---------------------------------------------- bridge rectangles
+    if model.get('bridge_fits'):
+        L += _bridge_table(model['bridge_fits'],
+                           args.get('bridge_snap_angle'))
 
     # ---------------------------------------------- mesh
     L.append("## Mesh\n")
@@ -646,7 +681,9 @@ def run(gds, seg_len, thickness=None, lambda_L=None, L_square=None,
         grid=grid, log_color=log_color, nonlinear=nonlinear, nl_tol=nl_tol,
         nl_maxiter=nl_maxiter, backend=backend, thickness=thickness,
         verbose=verbose,
-        report_args=dict(gds=gds, thickness=thickness, lambda_L=lambda_L,
+        report_args=dict(gds=gds,
+                         bridge_snap_angle=kw.get('bridge_snap_angle', 0.5),
+                         thickness=thickness, lambda_L=lambda_L,
                          L_square=L_square))
     return model, sols, res
 
@@ -748,6 +785,16 @@ def main(argv=None):
                         "tolerance (um) before their intersection with the "
                         "metal, removes the small triangles of finely drawn "
                         "pads")
+    p.add_argument("--bridge-shape", type=str, default="rect",
+                   choices=["rect", "exact"],
+                   help="'rect' replaces each layer-2 polygon by its closest "
+                        "rectangle (minimum area of the symmetric "
+                        "difference), 'exact' keeps the polygons as drawn "
+                        "(default rect)")
+    p.add_argument("--bridge-snap-angle", type=float, default=0.5,
+                   help="bridge rectangles tilted by at most this angle (deg) "
+                        "with respect to the x or y axis are made exactly "
+                        "axis-aligned, 0 disables (default 0.5)")
     a = p.parse_args(argv)
 
     gr = None
@@ -762,7 +809,9 @@ def main(argv=None):
     elif a.LJ is not None:
         jd = dict(LJ_nH=a.LJ)
 
-    run(a.gds, a.seg, thickness=a.thickness, lambda_L=a.lambda_london,
+    run(a.gds, a.seg,
+        bridge_shape=a.bridge_shape, bridge_snap_angle=a.bridge_snap_angle,
+        thickness=a.thickness, lambda_L=a.lambda_london,
         L_square=a.Lsq * 1e-12 if a.Lsq is not None else None,
         current=a.current, out_prefix=a.out, loop_z=a.loop_z,
         plot=not a.no_plot, nonlinear=a.nonlinear,
