@@ -3,7 +3,14 @@
 Input, a GDS. Output, a current map for each injection polygon of layer 3, the
 mutual-inductance matrix `M_ij = Φ_i / I_j` relating the flux through each
 layer-5 surface to the current injected into each layer-3 polygon, and a
-Markdown report. All produced files and all program messages are in English.
+Markdown report. With `--Bext`, the response to a uniform field perpendicular
+to the plane is computed as well, with the flux concentration `Φ/(A B_ext)` in
+each layer-5 surface (§2.7). All produced files and all program messages are
+in English.
+
+Version 1.0.0 (`version.py`, `python run.py --version`). The report starts
+with the version, a fingerprint of the source files, the command typed in the
+terminal and an equivalent command where every option is explicit.
 
 All lengths are in micrometres, currents in amperes, fluxes in webers.
 
@@ -311,6 +318,56 @@ with quadrature refinement for nearby triangles. Any holes in the layer-5
 polygons are handled by the orientation of the interior contours. The normal is
 `+ẑ` and the outer contour is traversed counter-clockwise.
 
+### 2.7 Applied perpendicular field
+
+`--Bext B` (µT, sign included) applies a uniform field `B ẑ`, perpendicular
+to the plane of the GDS, in a computation separate from the injections, with
+no injected current. The layer-3 and layer-4 pads carry no current in it, a
+DC current through their resistances to ground cannot be sustained. Layers 3
+and 4 may then be empty. The functional minimised is the energy of §2.1 plus
+the work of the applied vector potential
+
+```
+G[K] = E[K] + ∫ K · A_ext dA ,      A_ext = (B/2) ẑ × (r − r_c)
+```
+
+whose stationarity gives `µ0 Λ K + A_K + A_ext = −(ħ/2e) ∇θ`, the fluxoid
+`∮ (µ0 Λ K + A_K + A_ext)·dl = n Φ0` being imposed with `n = 0` in every hole.
+This is the state reached by cooling in zero field, then applying `B`. A
+field-cooled state, in which holes trap a non-zero fluxoid, is not computed.
+
+`A_ext` is linear, so that `∫_T K·A_ext dA = A_T K_T · A_ext(c_T)` is exact
+per triangle. `A_ext` has no `z` component, it does not couple to the
+vertical pillars. The result does not depend on the gauge centre `r_c`. For
+`K = ẑ × ∇g`, `∫ (ẑ × ∇g)·∇χ dA = Σ_c g_c ∮ ∇χ·dl = 0`. For a bridge loop,
+the current of pillar `k` leaves the plane at the barycentre `p_k` of the
+foot nodes of the plane and enters the bridge at the barycentre `b_k` of the
+foot nodes of the bridge. Since `p_k ≠ b_k` on the mesh, each loop is closed
+by the segment `p_k → b_k`, which adds
+
+```
+Σ_k I_k A_ext((p_k + b_k)/2) · (b_k − p_k)
+```
+
+to `G`, `I_k` being the upward pillar current. Gauge invariance is then exact
+(test 11, `10⁻¹²`). Without this term a bridge at a distance `d` from `r_c`
+would receive a spurious drive proportional to `d |b_k − p_k|`.
+
+For each layer-5 surface `S` of net area `A` (holes removed) and normal `+ẑ`
+
+```
+Φ = A B + ∮_{∂S} A_K · dl ,      C = Φ / (A B)
+```
+
+`C = 1` without superconductor, `C < 1` for a surface covered by screening
+metal, `C > 1` where the expelled flux is pushed, slots and gaps open to the
+outside. A hole enclosed by a closed loop of metal keeps `n = 0`, hence
+`C ≈ 0`. The report also gives the magnetic moment
+`m_z = (1/2) ∫ (r × K)·ẑ dA = ∫ K·A_ext dA / B` and the check
+`B m_z / (−2E) = 1`, which holds at the minimum of a quadratic `G` with no
+injection (it is not printed with `--nonlinear`). A warning is printed when a
+junction carries `|I_J| ≥ I_c`, no zero-voltage static solution existing then.
+
 ---
 
 ## 3. Installation
@@ -354,6 +411,7 @@ python -m scdc.make_example_gds example.gds
 python -m scdc.run example.gds --thickness 0.1 --lambda-london 0.09 --seg 1.5 \
        --current 1e-3 --bridge-height 3.0 --out result
 python -m scdc.run example.gds --Lsq 0.14 --seg 1.5 --EJ 20 --nonlinear
+python -m scdc.run example.gds --Lsq 0.14 --seg 1.5 --EJ 20 --Bext 10
 python validation.py
 ```
 
@@ -363,18 +421,25 @@ form.
 
 Outputs (prefix `--out`, here `result`).
 
-- `result_report.md`, a Markdown report starting with the matrix `M` in pH and
-  the eigenvalues of `M⁻¹` in mA/Φ0, then parameters (including the ground
-  current shares per source), mesh, energy and
-  inductance `2E/I²` per source, flux `Φ/Φ0` per surface and per source, pillar
-  currents and junction currents.
+- `result_report.md`, a Markdown report starting with the version and the
+  command line, then the matrix `M` in pH and the eigenvalues of `M⁻¹` in
+  mA/Φ0, the flux concentrations with `--Bext`, parameters (including the
+  ground current shares per source), mesh, energy and inductance `2E/I²` per
+  source, flux `Φ/Φ0` per surface and per case, pillar currents and junction
+  currents. An appendix gives the value and origin (command line or default)
+  of every option.
+- `result_field.csv`, with `--Bext`, one row per layer-5 surface with its
+  area, `A B/Φ0`, `Φ/Φ0` and the concentration.
+- `result_current_Bext.png`, with `--Bext`, the map of the screening
+  currents, with its own colour scale.
 - `result_current_<k>_<name>.png`, a map of `|K|` with streamlines for each
   layer-3 polygon.
 - `result_mutual.csv`, one row per layer-5 surface, one column
   `M_pH_<source>` per layer-3 polygon.
 - `result_solution.npz`, the complete mesh, `K` of shape
   `(n_sources, n_tri, 2)`, `M`, fluxes and the names of the sources and
-  surfaces.
+  surfaces, and with `--Bext` the arrays `K_field`, `flux_field`,
+  `concentration`, `area_field` and `Bext_uT`.
 
 As a library.
 
@@ -385,6 +450,9 @@ model, sols, res = run("example.gds", thickness=0.1, lambda_L=0.09,
 print(res["M"] * 1e12)            # (n_surfaces, n_sources) matrix in pH
 print(res["inv_eigenvalues"])     # eigenvalues of M^-1 in mA/Phi0
 J = sols[0].current_density(0.1)  # A/µm² for the first source
+model, sols, res = run("example.gds", L_square=0.14e-12, seg_len=1.5,
+                       Bext=10.0, junction_default=dict(EJ_GHz=20))
+print(res["field"]["concentration"])   # Phi / (A B_ext) per layer-5 surface
 ```
 
 `run.solve_model(model, ...)` accepts a dictionary built by hand (mesh,
@@ -417,6 +485,8 @@ Useful options.
 | `--near-cells` | pFFT precorrection radius, default 4 |
 | `--backend` | `numpy`, `mlx`, `torch` or `auto` |
 | `--seg-far`, `--fine-radius`, `--seg-max` | mesh grading |
+| `--Bext` | uniform field along `+z` (µT), flux concentration per layer-5 surface |
+| `--version` | prints the version |
 
 ### Graded mesh
 
@@ -542,6 +612,10 @@ source is written (`--map k` to write only one).
 | junction patch `L_J = 0.5` and `5 nH` in a track, `L_tot − L_track` | deviation 2×10⁻⁵ |
 | pFFT solver against dense assembly | 0.1 % on `E`, 10⁻³ on `K` |
 | ring 6–10 µm, `L = Φ0/I = 23.1 pH` against `µ0 R [ln(8R/a) − 2] ≈ 21.7 pH` | consistent |
+| disk in a field, `Λ ≫ R`, `m = −πBR⁴/(8µ0Λ)`, two gauge centres | 0.99981 at `Λ/R = 5000`, identical for both centres |
+| disk in a field, `Λ ≪ R`, `m = −8BR³/(3µ0)` (Clem and Sanchez) | 0.903 at `Λ/R = 0.01`, 0.973 at 0.002 |
+| ring 6–10 µm, reciprocity `I_B = −B m₁/Φ0` with the `n = 1` state | exact |
+| bridge loop with pillars in a field, dense against pFFT, gauge centre moved | `2×10⁻³`, `10⁻¹²` |
 
 ```bash
 python validation.py
@@ -599,6 +673,9 @@ Two-dimensional London model and screening currents.
 - R. Meservey and P. M. Tedrow, *Measurements of the kinetic inductance of
   superconducting linear structures*, J. Appl. Phys. **40**, 2028 (1969).
   <https://doi.org/10.1063/1.1657905>
+- J. R. Clem and A. Sanchez, *Hysteretic ac losses and susceptibility of thin
+  superconducting disks*, Phys. Rev. B **50**, 9355 (1994).
+  <https://doi.org/10.1103/PhysRevB.50.9355>
 - J. R. Clem and K. K. Berggren, *Geometry-dependent critical currents in
   superconducting nanocircuits*, Phys. Rev. B **84**, 174510 (2011).
   <https://arxiv.org/abs/1109.4881>

@@ -232,3 +232,124 @@ for ell, LJn in [(1.0, 0.5e-9), (1.0, 5e-9)]:
     Lt = 2 * s.energy / I**2
     print(f"   L_J = {LJn*1e9:4.1f} nH : L_tot - L_piste = {(Lt-L0)*1e9:.5f} nH"
           f"   ecart {(Lt-L0-LJn)/LJn*100:+.4f} %")
+
+# ====================================================== 8 to 11 : applied field
+try:
+    from scdc.core import external_field_drive, magnetic_moment_z
+except ImportError:
+    from core import external_field_drive, magnetic_moment_z
+from scipy.spatial import Delaunay
+
+
+def disk_mesh(R, nr, grade=1.0, c=(0.0, 0.0)):
+    """Disk of radius R, nr rings of nodes, spacing graded towards the edge
+    for grade > 1."""
+    s = np.linspace(0, 1, nr + 1)
+    rs = R * (1 - (1 - s) ** grade)
+    dr = np.diff(rs)
+    p = [[0.0, 0.0]]
+    for k, r in enumerate(rs[1:]):
+        nt = max(8, int(np.ceil(2 * np.pi * r / dr[k])))
+        t = np.linspace(0, 2 * np.pi, nt, endpoint=False)
+        p += list(np.column_stack([r * np.cos(t), r * np.sin(t)]))
+    p = np.array(p) + np.asarray(c)
+    return p, Delaunay(p).simplices
+
+
+Bz = 1e-6 * 1e-12              # 1 uT in Wb/um^2
+
+print()
+print(line)
+print("8. Disk in a perpendicular field, kinetic limit Lambda >> R, and gauge")
+print(line)
+# K = -A_ext / (mu0 Lambda) in the London gauge, m_z = -pi B R^4 / (8 mu0 Lambda)
+R = 10.0
+for c in [(0.0, 0.0), (37.0, -21.0)]:
+    pd, td = disk_mesh(R, 14, c=c)
+    for Lam in (500.0, 5e4):
+        asm = Assembly([Sheet(pd, td, 0.0, Lam)])
+        s = solve_currents(asm, [], drive=external_field_drive(asm, Bz),
+                           verbose=False)
+        m = magnetic_moment_z(asm, s.K, center=c)
+        # same moment computed with the discrete r^2 of the mesh
+        r2 = np.sum((asm.centroid - np.asarray(c)) ** 2, axis=1)
+        mk = -Bz / (4 * MU0 * Lam) * np.sum(asm.area * r2)
+        E = total_energy(asm, s.K)
+        print(f"   centre ({c[0]:5.1f}, {c[1]:5.1f}) Lambda = {Lam:7.0f} um   "
+              f"m / m_kin = {m/mk:.5f}   B m / (-2E) = {Bz*m/(-2*E):.7f}")
+
+print()
+print(line)
+print("9. Disk in a perpendicular field, Meissner limit, m = -8 B R^3 / (3 mu0)")
+print(line)
+pd, td = disk_mesh(R, 16, grade=2.0)
+mM = -8 * Bz * R ** 3 / (3 * MU0)
+for Lam in (0.1, 0.02):
+    asm = Assembly([Sheet(pd, td, 0.0, Lam)])
+    s = solve_currents_fast(asm, [], drive=external_field_drive(asm, Bz),
+                            verbose=False)
+    m = magnetic_moment_z(asm, s.K)
+    x = Lam / R
+    print(f"   Lambda/R = {x:.3f}   m / m_Meissner = {m/mM:.4f}   "
+          f"1 - m/m_M = {1 - m/mM:.4f}   (Lambda/R) ln(R/Lambda) = "
+          f"{x*np.log(1/x):.4f}")
+
+print()
+print(line)
+print("10. Ring 6-10 um, reciprocity I_B = -B m_1 / Phi0 between the field")
+print("    response (n = 0) and the fluxoid state n = 1")
+print(line)
+asm = Assembly([Sheet(pa, ta, 0.0, effective_penetration_depth(0.09, 0.1))])
+nd, ndof, holes, loops = build_dof_map(asm)
+s1 = solve_currents(asm, [], fluxoid={holes[0][1]: 1}, verbose=False)
+sB = solve_currents(asm, [], drive=external_field_drive(asm, Bz), verbose=False)
+I1 = s1.info['g'][holes[0][0]]
+IB = sB.info['g'][holes[0][0]]
+m1 = magnetic_moment_z(asm, s1.K)
+EB = total_energy(asm, sB.K)
+print(f"   I_B = {IB*1e9:.6f} nA   -B m_1 / Phi0 = {-Bz*m1/PHI0*1e9:.6f} nA")
+print(f"   effective area |m_1 / I_1| = {abs(m1/I1):.3f} um^2, between "
+      f"pi r_in^2 = {np.pi*36:.3f} and pi r_out^2 = {np.pi*100:.3f} um^2")
+print(f"   B m_B / (-2E) = {Bz*magnetic_moment_z(asm, sB.K)/(-2*EB):.7f}   "
+      f"fluxoid of the hole {sB.info['fluxoids'][holes[0][0]]/PHI0:.2e} Phi0")
+
+print()
+print(line)
+print("11. Loop closed by an airbridge with pillars in a field, dense against")
+print("    pFFT and independence on the gauge centre")
+print(line)
+Lam = effective_penetration_depth(0.09, 0.1)
+p0, t0 = rect_mesh(0, 24, 0, 16, 48, 32)
+cc = p0[t0].mean(axis=1)
+t0 = t0[~((np.abs(cc[:, 0] - 12) < 2) & (cc[:, 1] < 12))]     # U shape
+u = np.unique(t0)
+rm = -np.ones(len(p0), int)
+rm[u] = np.arange(len(u))
+p0, t0 = p0[u], rm[t0]
+pb, tb = rect_mesh(6, 18, 4, 8, 24, 8)
+asm = Assembly([Sheet(p0, t0, 0.0, Lam, "metal"),
+                Sheet(pb, tb, 3.0, Lam, "bridge")])
+o = asm.node_offset
+n1, n2 = asm.sheets[0].points, asm.sheets[1].points
+inA = lambda q, x0, x1: (q[:, 0] >= x0 - 1e-9) & (q[:, 0] <= x1 + 1e-9) & \
+    (q[:, 1] >= 4 - 1e-9) & (q[:, 1] <= 8 + 1e-9)
+ct = [Contact(np.where(inA(n1, 6, 8))[0], np.where(inA(n2, 6, 8))[0] + o[1]),
+      Contact(np.where(inA(n1, 16, 18))[0], np.where(inA(n2, 16, 18))[0] + o[1])]
+pLm = np.array([[20e-12, 5e-12], [5e-12, 20e-12]])
+out = {}
+for key, cen in [("dense", None), ("dense, centre moved", (500.0, -300.0)),
+                 ("pFFT", None)]:
+    dr = external_field_drive(asm, Bz, center=cen, contacts=ct)
+    if key.startswith("dense"):
+        s = solve_currents(asm, [], ct, pillar_L=pLm, drive=dr, verbose=False)
+        s.energy = total_energy(asm, s.K, contacts=ct, pillar_L=pLm)
+    else:
+        s = solve_currents_fast(asm, [], ct, pillar_L=pLm, drive=dr,
+                                verbose=False)
+    out[key] = s
+    print(f"   {key:20s} pillar currents {s.info['contact_currents']*1e9} nA"
+          f"   E = {s.energy:.6e} J")
+ref = out["dense"].K
+for key in ("dense, centre moved", "pFFT"):
+    print(f"   |K - K_dense| / |K_dense| ({key}) = "
+          f"{np.linalg.norm(out[key].K - ref)/np.linalg.norm(ref):.2e}")

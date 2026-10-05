@@ -279,7 +279,7 @@ class Solution:
 
 def solve_currents(asm: Assembly, terminals, contacts=(), fluxoid=None,
                    terminal_profile="uniform", chunk=192, pillar_L=None,
-                   verbose=True):
+                   drive=None, verbose=True):
     """Minimise l'energie sous contraintes et retourne la solution.
 
     fluxoid : dict {indice_de_trou: n} imposant Int (mu0*Lambda*K + A).dl
@@ -288,6 +288,10 @@ def solve_currents(asm: Assembly, terminals, contacts=(), fluxoid=None,
     pillar_L : matrice (n_contacts, n_contacts) des inductances propres et
               mutuelles des piliers verticaux. Ajoute (1/2) I^T L I a
               l'energie, I_k etant le courant dans le contact k.
+    drive : (n_tri, 2) linear term a_T of the energy, G = E + Sum_T a_T.K_T,
+              see core.external_field_drive (uniform applied field). The
+              returned energy is then the self energy E, the work term
+              Sum a.K being stored in info['drive_energy'].
     """
     # ------------------------------------------------- champ d'amorcage
     loads = np.zeros(asm.n_nodes)
@@ -298,7 +302,10 @@ def solve_currents(asm: Assembly, terminals, contacts=(), fluxoid=None,
 
     merge = [np.concatenate([c.nodes_a, c.nodes_b]) for c in contacts]
     S = asm.stiffness()
-    kseed = resistive_field(asm, loads, merge_groups=merge, K_stiff=S)
+    if np.any(loads):
+        kseed = resistive_field(asm, loads, merge_groups=merge, K_stiff=S)
+    else:
+        kseed = np.zeros((asm.n_tri, 2))     # no injection (field response)
 
     # ------------------------------------------------- boucles de ponts
     ncomp, lab = asm.components()
@@ -334,6 +341,13 @@ def solve_currents(asm: Assembly, terminals, contacts=(), fluxoid=None,
         H += R.T @ Lp @ R
         b += R.T @ (Lp @ Iseed)
 
+    # linear term of an applied field, G = E + a.K, K = kseed + C g + B alpha
+    if drive is not None:
+        drive = np.asarray(drive, dtype=float)
+        b[:ndof] += Cx.T @ drive[:, 0] + Cy.T @ drive[:, 1]
+        if len(cycles):
+            b[ndof:] += np.einsum('mdc,md->c', B, drive)
+
     rhs = -b
     if fluxoid:
         for dofi, loopi in hole_dofs:
@@ -354,6 +368,10 @@ def solve_currents(asm: Assembly, terminals, contacts=(), fluxoid=None,
     info = dict(node_dof=node_dof, loops=loops, hole_dofs=hole_dofs,
                 g=g, alpha=alpha, kseed=kseed, cycles=cycles,
                 fluxoids=(H @ x + b))
+    if drive is not None:
+        info['drive_energy'] = float(np.sum(drive * K))
+        # self energy (kinetic + magnetic + pillars), without the work term
+        energy = energy - float(np.sum(drive * (K - kseed)))
     if contacts:
         info['contact_currents'] = contact_currents(asm, K, contacts)
     return Solution(asm, K, energy, info)

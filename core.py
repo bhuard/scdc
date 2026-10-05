@@ -551,6 +551,92 @@ def vector_potential(asm: Assembly, K, pts, z=0.0, near=3.0):
     return out
 
 
+def uniform_field_vector_potential(pts, Bz, center=(0.0, 0.0)):
+    """Vector potential of a uniform field B_ext = Bz z (Bz in Wb/um^2,
+    i.e. tesla * 1e-12), symmetric gauge about `center`,
+
+        A_ext(r) = (Bz / 2) z x (r - r_c) = (Bz / 2) (-(y - y_c), x - x_c, 0).
+
+    A_ext has no z component, so it does not couple to the vertical pillar
+    currents, and curl A_ext = Bz z. The response of the film does not depend
+    on r_c (gauge invariance, see external_field_drive). Returns (P, 2) in
+    Wb/um."""
+    p = np.atleast_2d(np.asarray(pts, dtype=float))
+    cx, cy = float(center[0]), float(center[1])
+    return 0.5 * float(Bz) * np.column_stack([-(p[:, 1] - cy), p[:, 0] - cx])
+
+
+def external_field_drive(asm: Assembly, Bz, center=None, contacts=()):
+    """Linear term of the energy in a uniform perpendicular field.
+
+    In the field B_ext = Bz z the functional minimised becomes
+
+        G[K] = E[K] + Int K . A_ext dA ,
+
+    whose stationarity gives mu0 Lambda K + A_K + A_ext = -(hbar/2e) grad
+    theta, and whose fluxoid condition around each hole contains A_ext. With
+    K constant per triangle and A_ext linear, the integral is exactly
+    Sum_T A_T K_T . A_ext(c_T), c_T being the centroid. The returned array
+    a (n_tri, 2), a_T = A_T A_ext(c_T) in Wb.um, is that coefficient.
+
+    Gauge. Changing r_c adds grad(chi) to A_ext with chi(x, y) independent
+    of z. For K = z x grad(g) with g constant on each contour,
+    Int (z x grad g).grad(chi) dA = Sum_contours g_c Oint grad(chi).dl = 0.
+    A bridge loop closes through vertical pillars, along which d chi/dz = 0.
+
+    Contacts (bridge feet). On the mesh, the current of pillar k leaves the
+    plane at the area-weighted centroid p_k of the foot nodes of the plane
+    and enters the bridge at the centroid b_k of the foot nodes of the
+    bridge (solver._node_loads), and p_k != b_k in general. The loop is
+    closed exactly by the straight segment p_k -> b_k carried by the upward
+    pillar current I_k = D_k . K (solver.contact_current_operator), which
+    adds the term
+
+        Sum_k I_k A_ext((p_k + b_k)/2) . (b_k - p_k)
+
+    to G. For a uniform field chi is linear, the weak form of the loop
+    fields is exact on linear functions, and the total is then exactly
+    independent of r_c. Without this term a bridge far from r_c would
+    receive a spurious drive proportional to |r_c - p_k| |b_k - p_k|.
+
+    The centre of the bounding box is used by default for r_c.
+
+    Bz in Wb/um^2 (tesla * 1e-12).
+    """
+    if center is None:
+        lo, hi = asm.points.min(axis=0), asm.points.max(axis=0)
+        center = 0.5 * (lo + hi)
+    A = uniform_field_vector_potential(asm.centroid, Bz, center)
+    a = asm.area[:, None] * A
+    if contacts:
+        try:
+            from .solver import contact_current_operator
+        except ImportError:
+            from solver import contact_current_operator
+        Dx, Dy = contact_current_operator(asm, contacts)
+        c = np.zeros(len(contacts))
+        for k, ct in enumerate(contacts):
+            def cen(nd):
+                w = asm.node_area[nd]
+                return (w[:, None] * asm.points[nd]).sum(axis=0) / w.sum()
+            p, b = cen(ct.nodes_a), cen(ct.nodes_b)
+            Am = uniform_field_vector_potential(0.5 * (p + b), Bz, center)[0]
+            c[k] = float(Am @ (b - p))
+        a[:, 0] += Dx.T @ c
+        a[:, 1] += Dy.T @ c
+    return a
+
+
+def magnetic_moment_z(asm: Assembly, K, center=(0.0, 0.0)):
+    """m_z = (1/2) Int (r - r_c) x K . z dA in A.um^2.
+
+    Independent of r_c when the net current injected into the film is zero,
+    which is the case in the field response. Int K . A_ext dA = Bz m_z, so at
+    the minimum of G (linear response, no injection) Bz m_z = -2 E."""
+    c = asm.centroid - np.asarray(center, dtype=float)[None, :]
+    return 0.5 * float(np.sum(asm.area * (c[:, 0] * K[:, 1] - c[:, 1] * K[:, 0])))
+
+
 def flux_through_polygon(asm: Assembly, K, ring, z=0.0, seg=None):
     """Phi = Contour_int A.dl  (Wb) sur un polygone ferme (N,2)."""
     ring = np.asarray(ring, dtype=float)

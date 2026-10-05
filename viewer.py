@@ -18,8 +18,11 @@ Interactive window, keys
                               tools for panning
 A left click prints K, |K| and J = K/d at the clicked point.
 
-The colour scale is common to all maps (same injected current in each
-source), so that the maps can be compared when cycling with i.
+The colour scale is common to all maps of the same group, the maps of the
+injection polygons (same injected current in each source) forming one
+group, so that they can be compared when cycling with i. The response to
+the applied field B_ext (run.py --Bext), when present, is the last map and
+has its own colour scale.
 """
 
 from __future__ import annotations
@@ -54,12 +57,16 @@ class CurrentView:
 
     K : (n_tri, 2) for a single map, or (n_maps, n_tri, 2).
     names : one label per map, shown in the title.
+    captions : one title per map, default "injection in <name>".
+    groups : one integer per map, the maps of a group share the colour
+             scale, default a single group.
     """
 
     KEYS = ("i", "I", "l", "S", "q", "c")
 
     def __init__(self, points, triangles, K, area, overlays=None,
-                 thickness=None, title=None, log_color=False, names=None):
+                 thickness=None, title=None, log_color=False, names=None,
+                 captions=None, groups=None):
         import matplotlib.pyplot as plt
         import matplotlib.tri as mtri
         self.plt = plt
@@ -77,6 +84,12 @@ class CurrentView:
             [f"source {k}" for k in range(self.n_maps)]
         if len(self.names) != self.n_maps:
             raise ValueError("names must have one entry per current map")
+        self.captions = list(captions) if captions is not None else \
+            [f"injection in {nm}" for nm in self.names]
+        self.groups = np.zeros(self.n_maps, dtype=int) if groups is None \
+            else np.asarray(groups, dtype=int)
+        if len(self.captions) != self.n_maps or len(self.groups) != self.n_maps:
+            raise ValueError("captions and groups need one entry per map")
         self.pts, self.tri, self.area = points, triangles, area
         self.d = thickness
         self.base_title = title
@@ -86,10 +99,15 @@ class CurrentView:
         self.artists = []
         self.imap = 0
 
-        # common colour scale over all maps
+        # colour scale common to the maps of each group
         mags = np.linalg.norm(self.Ks, axis=2)
-        self.vmax = float(np.percentile(mags, 99.7))
-        self.vmin = max(float(np.percentile(mags, 0.5)), 1e-5 * self.vmax)
+        self.scales = {}
+        for g in np.unique(self.groups):
+            m = mags[self.groups == g]
+            vmax = float(np.percentile(m, 99.7))
+            vmax = vmax if vmax > 0 else max(float(m.max()), 1e-300)
+            vmin = max(float(np.percentile(m, 0.5)), 1e-5 * vmax)
+            self.scales[int(g)] = (vmin, vmax)
 
         x0, x1 = points[:, 0].min(), points[:, 0].max()
         y0, y1 = points[:, 1].min(), points[:, 1].max()
@@ -126,13 +144,14 @@ class CurrentView:
     def _load_map(self, k):
         import matplotlib.tri as mtri
         self.imap = int(k) % self.n_maps
+        self.vmin, self.vmax = self.scales[int(self.groups[self.imap])]
         self.mag = np.linalg.norm(self.K, axis=1)
         Kn = nodal_from_tri(self.pts, self.tri, self.area, self.K)
         self.ix = mtri.LinearTriInterpolator(self.T, Kn[:, 0])
         self.iy = mtri.LinearTriInterpolator(self.T, Kn[:, 1])
 
     def _set_title(self, extra=None):
-        t = f"injection in {self.names[self.imap]}"
+        t = self.captions[self.imap]
         if self.n_maps > 1:
             t += f"  [{self.imap + 1}/{self.n_maps}, key i]"
         if self.base_title:
@@ -301,7 +320,17 @@ def load_npz(path):
         names = [str(s) for s in d["source_names"]]
     else:
         names = [f"source {k}" for k in range(len(K))]
+    cur = float(d["current"])
+    captions = [f"injection of I = {cur*1e3:g} mA in {nm}" for nm in names]
+    groups = [0] * len(names)
+    if "K_field" in d and d["K_field"].size:
+        K = np.concatenate([K, d["K_field"][sel][None]], axis=0)
+        names.append("B_ext")
+        captions.append(f"applied field B_ext = {float(d['Bext_uT']):g} uT "
+                        "along +z")
+        groups.append(1)
     return dict(points=d["points"], triangles=tri, K=K, names=names,
+                captions=captions, groups=groups,
                 area=d["area"][sel], overlays=ov,
                 thickness=float(d["thickness"]) if "thickness" in d else None,
                 Lambda=float(d["Lambda"]), current=float(d["current"]))
@@ -328,9 +357,9 @@ def main(argv=None):
     n = np.max(m["triangles"]) + 1
     v = CurrentView(m["points"][:n], m["triangles"], m["K"], m["area"],
                     overlays=m["overlays"], thickness=m["thickness"],
-                    title=f"I = {m['current']*1e3:g} mA, "
-                          f"$\\Lambda$ = {m['Lambda']:.3g} $\\mu$m",
-                    log_color=a.log, names=m["names"])
+                    title=f"$\\Lambda$ = {m['Lambda']:.3g} $\\mu$m",
+                    log_color=a.log, names=m["names"],
+                    captions=m["captions"], groups=m["groups"])
     if a.png:
         idx = range(v.n_maps) if a.map is None else [a.map % v.n_maps]
         for k in idx:

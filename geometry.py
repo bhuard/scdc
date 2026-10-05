@@ -601,7 +601,8 @@ def build_model(gds_path, *,
                 bridge_feet="ends", pillar_side=30.0, pillar_height=None,
                 pillar_lambda=None, pillars=True,
                 cell=None, scale=1.0,
-                current=1e-3, ground_resistances=None, verbose=True):
+                current=1e-3, ground_resistances=None, require_sources=True,
+                verbose=True):
     """Construit l'assemblage, les terminaux et les contacts a partir du GDS.
 
     Le layer 3 peut contenir plusieurs polygones d'injection. Chacun donne
@@ -655,6 +656,10 @@ def build_model(gds_path, *,
     degrees with respect to the axes are made exactly axis-aligned.
     bridge_shape="exact" keeps the polygons as drawn. The fits are
     returned in `bridge_fits` (None in exact mode).
+
+    require_sources : when False (applied-field computation, run.py
+    --Bext), layers 3 and 4 may both be empty, terminal_sets is then an
+    empty list. A layer-3 polygon still requires at least one layer-4 pad.
 
     Retourne un dictionnaire avec toutes les pieces du probleme.
     """
@@ -724,16 +729,18 @@ def build_model(gds_path, *,
         bridges, bridge_fits = _rectify_bridges(
             bridges, snap_deg=bridge_snap_angle, verbose=verbose)
     loops = _sort_polygons(_as_polygon_list(loop_geo))
-    if not src_regions:
+    if not src_regions and require_sources:
         raise ValueError(f"layer {layer_source} is empty, at least one "
-                         "injection polygon (disk, rectangle ...) is required")
-    if not gnd_regions:
+                         "injection polygon (disk, rectangle ...) is required "
+                         "unless an applied field is given (--Bext)")
+    if not gnd_regions and src_regions:
         raise ValueError(f"layer {layer_ground} is empty")
     source_names = _label_names(src_regions, src_labels, "S")
     loop_names = _label_names(loops, loop_labels, "L")
     if verbose:
         print(f"  {len(src_regions)} injection polygon(s) in layer "
-              f"{layer_source}: {', '.join(source_names)}")
+              f"{layer_source}" + (f": {', '.join(source_names)}"
+                                   if source_names else ""))
         if loops:
             print(f"  {len(loops)} flux surface(s) in layer {layer_loop}: "
                   f"{', '.join(loop_names)}")
@@ -952,7 +959,7 @@ def build_model(gds_path, *,
     gcond = 1.0 / ground_resistances
     # parts de reference si tous les plots etaient relies a la source, les
     # parts effectives par source sont dans ground_shares
-    gshare = gcond / gcond.sum()
+    gshare = gcond / gcond.sum() if len(gcond) else np.zeros(0)
     gnd_nodes = [nodes_in(g, 0) for g in gnd_c]
     for k, nd in enumerate(gnd_nodes):
         if len(nd) == 0 and verbose:
@@ -971,7 +978,7 @@ def build_model(gds_path, *,
     terminal_sets, gshares = build_terminal_sets(
         asm, src_nodes, gnd_nodes, current, conductances=gcond,
         contacts=contacts, source_names=source_names, verbose=verbose)
-    terminals = terminal_sets[0]
+    terminals = terminal_sets[0] if terminal_sets else []
 
     rings = []
     for nm, p in zip(loop_names, loops):

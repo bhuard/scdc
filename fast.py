@@ -234,8 +234,13 @@ def solve_currents_fast(asm: Assembly, terminals, contacts=(), fluxoid=None,
                         terminal_profile="uniform", grid=None, near_cells=4,
                         prec_cells=1.5, near_hmax=None, tol=None, maxiter=400,
                         kernel=None, backend=None, pillar_L=None,
-                        verbose=True):
+                        drive=None, verbose=True):
     """Meme probleme que solver.solve_currents, resolu iterativement.
+
+    drive : (n_tri, 2) linear term a_T of the energy, G = E + Sum_T a_T.K_T,
+             see core.external_field_drive (uniform applied field). The
+             returned energy is the self energy E = K.W.K/2, the work term
+             Sum a.K is stored in info['drive_energy'].
 
     kernel : FastKernel deja construit (le noyau ne depend que de la
              geometrie, on peut le reutiliser quand seul Lambda change).
@@ -251,7 +256,10 @@ def solve_currents_fast(asm: Assembly, terminals, contacts=(), fluxoid=None,
         raise ValueError("terminal currents do not sum to zero")
     merge = [np.concatenate([c.nodes_a, c.nodes_b]) for c in contacts]
     Sstiff = asm.stiffness()
-    kseed = resistive_field(asm, loads, merge_groups=merge, K_stiff=Sstiff)
+    if np.any(loads):
+        kseed = resistive_field(asm, loads, merge_groups=merge, K_stiff=Sstiff)
+    else:
+        kseed = np.zeros((asm.n_tri, 2))     # no injection (field response)
 
     ncomp, lab = asm.components()
     edges = [(int(lab[c.nodes_a[0]]), int(lab[c.nodes_b[0]])) for c in contacts]
@@ -316,6 +324,9 @@ def solve_currents_fast(asm: Assembly, terminals, contacts=(), fluxoid=None,
     A = spla.LinearOperator((ntot, ntot), matvec=matvec, dtype=float)
 
     rhs = -contract(W_apply(kseed))
+    if drive is not None:
+        drive = np.asarray(drive, dtype=float)
+        rhs -= contract(drive)
     if fluxoid:
         for dofi, loopi in hole_dofs:
             n = fluxoid.get(loopi, 0)
@@ -366,6 +377,9 @@ def solve_currents_fast(asm: Assembly, terminals, contacts=(), fluxoid=None,
                   residual=res, iterations=it[0], kernel=FK, W_apply=W_apply)
     # fluxoide reel = H x + b = matvec(x) - rhs_sans_flux
     info_d['fluxoids'] = matvec(x) + contract(W_apply(kseed))
+    if drive is not None:
+        info_d['fluxoids'] += contract(drive)
+        info_d['drive_energy'] = float(np.sum(drive * K))
     if contacts:
         info_d['contact_currents'] = contact_currents(asm, K, contacts)
     sol = Solution(asm, K, None, info_d)
